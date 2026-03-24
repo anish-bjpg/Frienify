@@ -608,7 +608,7 @@
 // CONFIG
 // ============================================================
 const CLIENT_ID = '78f10a6095a945d48eb5ca79750555bf';
-const REDIRECT_URI = 'https://anish-bjpg.github.io/frienify';
+const REDIRECT_URI = 'https://anish-bjpg.github.io/Frienify';
 const SCOPES = [
   'user-read-private','user-read-email',
   'user-top-read','user-read-recently-played',
@@ -617,36 +617,108 @@ const SCOPES = [
   'streaming','user-read-playback-state',
   'user-modify-playback-state','user-read-currently-playing',
   'user-follow-read'
-].join('%20');
+].join(' ');
 
 // ============================================================
-// AUTH
+// PKCE AUTH
 // ============================================================
 let accessToken = null;
 let userData = null;
 let player = null;
 let deviceId = null;
 
-function spotifyLogin() {
-  const url = `https://accounts.spotify.com/authorize?response_type=token&client_id=${CLIENT_ID}&scope=${SCOPES}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
-  window.location.href = url;
+function generateRandomString(len) {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  return Array.from(crypto.getRandomValues(new Uint8Array(len))).map(b => chars[b % chars.length]).join('');
 }
 
-function getTokenFromUrl() {
-  const hash = window.location.hash.substring(1);
-  const params = new URLSearchParams(hash);
-  return params.get('access_token');
+async function generateCodeChallenge(verifier) {
+  const data = new TextEncoder().encode(verifier);
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+
+async function spotifyLogin() {
+  const verifier = generateRandomString(64);
+  const challenge = await generateCodeChallenge(verifier);
+  localStorage.setItem('sp_verifier', verifier);
+  const params = new URLSearchParams({
+    response_type: 'code',
+    client_id: CLIENT_ID,
+    scope: SCOPES,
+    redirect_uri: REDIRECT_URI,
+    code_challenge_method: 'S256',
+    code_challenge: challenge
+  });
+  window.location.href = 'https://accounts.spotify.com/authorize?' + params;
+}
+
+async function exchangeCode(code) {
+  const verifier = localStorage.getItem('sp_verifier');
+  const body = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: REDIRECT_URI,
+    client_id: CLIENT_ID,
+    code_verifier: verifier
+  });
+  const r = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body
+  });
+  const data = await r.json();
+  if (data.access_token) {
+    localStorage.setItem('sp_token', data.access_token);
+    if (data.refresh_token) localStorage.setItem('sp_refresh', data.refresh_token);
+    localStorage.setItem('sp_expires', Date.now() + data.expires_in * 1000);
+  }
+  return data.access_token;
+}
+
+async function refreshToken() {
+  const refresh = localStorage.getItem('sp_refresh');
+  if (!refresh) return null;
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    refresh_token: refresh,
+    client_id: CLIENT_ID
+  });
+  const r = await fetch('https://accounts.spotify.com/api/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body
+  });
+  const data = await r.json();
+  if (data.access_token) {
+    localStorage.setItem('sp_token', data.access_token);
+    localStorage.setItem('sp_expires', Date.now() + data.expires_in * 1000);
+    return data.access_token;
+  }
+  return null;
 }
 
 async function init() {
-  accessToken = getTokenFromUrl() || localStorage.getItem('sp_token');
+  // Handle code callback
+  const urlParams = new URLSearchParams(window.location.search);
+  const code = urlParams.get('code');
+  if (code) {
+    history.replaceState(null, null, window.location.pathname);
+    accessToken = await exchangeCode(code);
+  } else {
+    // Check if existing token is still valid
+    const expires = parseInt(localStorage.getItem('sp_expires') || '0');
+    if (Date.now() > expires - 60000) {
+      accessToken = await refreshToken();
+    } else {
+      accessToken = localStorage.getItem('sp_token');
+    }
+  }
+
   if (!accessToken) {
     document.getElementById('login-screen').style.display = 'flex';
     return;
   }
-  // Clear hash
-  if (window.location.hash) history.replaceState(null, null, ' ');
-  localStorage.setItem('sp_token', accessToken);
 
   // Test token
   try {
@@ -654,6 +726,7 @@ async function init() {
     if (userData.error) throw new Error('bad token');
   } catch {
     localStorage.removeItem('sp_token');
+    localStorage.removeItem('sp_refresh');
     accessToken = null;
     document.getElementById('login-screen').style.display = 'flex';
     return;
