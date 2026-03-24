@@ -1075,9 +1075,11 @@ async function openPlaylist(id, name, img, total) {
   document.getElementById('playlist-tracks-list').innerHTML = '<div class="loading">Loading tracks...</div>';
   // Paginate through all tracks
   let allTracks = [];
-  let nextUrl = `/playlists/${id}/tracks?limit=50&offset=0`;
+  let nextUrl = `/playlists/${id}/tracks?limit=50&offset=0&market=US`;
   while (nextUrl) {
     const data = await apiCall(nextUrl);
+    console.log('Playlist API response:', JSON.stringify(data).slice(0, 300));
+    if (data.error) { console.error('API error:', data.error); break; }
     const items = (data.items || []).filter(i => i.track && i.track.id);
     allTracks = allTracks.concat(items.map(i => i.track));
     nextUrl = data.next ? data.next.replace('https://api.spotify.com/v1','') : null;
