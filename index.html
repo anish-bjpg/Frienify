@@ -756,15 +756,40 @@ async function init() {
 }
 
 // ============================================================
-// SPOTIFY API
+// SPOTIFY API — FIXED: handles full URLs, 403s, and bad tokens
 // ============================================================
 async function apiCall(endpoint, method='GET', body=null) {
-  const opts = { headers: { 'Authorization': `Bearer ${accessToken}` } };
-  if (method !== 'GET') { opts.method = method; }
-  if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
-  const r = await fetch(`https://api.spotify.com/v1${endpoint}`, opts);
+  const opts = {
+    method: method,
+    headers: { 'Authorization': `Bearer ${accessToken}` }
+  };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  // Support both relative paths and full URLs (for pagination)
+  const url = endpoint.startsWith('http') ? endpoint : `https://api.spotify.com/v1${endpoint}`;
+  const r = await fetch(url, opts);
   if (r.status === 204) return {};
-  if (r.status === 401) { localStorage.removeItem('sp_token'); window.location.reload(); }
+  if (r.status === 401) {
+    // Token expired — try refresh once
+    const newToken = await refreshToken();
+    if (newToken) {
+      accessToken = newToken;
+      opts.headers['Authorization'] = `Bearer ${accessToken}`;
+      const retry = await fetch(url, opts);
+      if (retry.status === 204) return {};
+      try { return await retry.json(); } catch { return {}; }
+    }
+    localStorage.removeItem('sp_token');
+    localStorage.removeItem('sp_refresh');
+    window.location.reload();
+    return {};
+  }
+  if (r.status === 403) {
+    console.warn('403 Forbidden on:', endpoint, '— token may lack required scope');
+    return { error: { status: 403, message: 'Forbidden' } };
+  }
   try { return await r.json(); } catch { return {}; }
 }
 
@@ -889,11 +914,9 @@ async function loadSidebarPlaylists() {
 }
 
 // ============================================================
-// FRIENDS (using top tracks of followed artists as proxy)
+// FRIENDS
 // ============================================================
 async function loadFriends() {
-  // Spotify doesn't expose friend activity via API.
-  // We simulate using your followed artists + top listeners.
   const followed = await apiCall('/me/following?type=artist&limit=10');
   const el = document.getElementById('friends-list');
   const mockFriends = [
@@ -907,7 +930,6 @@ async function loadFriends() {
 
   if (followed.artists?.items?.length) {
     const artists = followed.artists.items.slice(0, 6);
-    // Get top track per artist
     const tracks = await Promise.all(artists.map(a =>
       apiCall(`/artists/${a.id}/top-tracks?market=US`).then(d => ({
         artist: a,
@@ -1073,20 +1095,28 @@ async function openPlaylist(id, name, img, total) {
   currentPlaylistUri = `spotify:playlist:${id}`;
 
   document.getElementById('playlist-tracks-list').innerHTML = '<div class="loading">Loading tracks...</div>';
+
   // Paginate through all tracks
   let allTracks = [];
-  let nextUrl = `/playlists/${id}/tracks?limit=50&offset=0&market=US`;
+  let nextUrl = `https://api.spotify.com/v1/playlists/${id}/tracks?limit=50&offset=0&market=US`;
   while (nextUrl) {
     const data = await apiCall(nextUrl);
-    console.log('Playlist API response:', JSON.stringify(data).slice(0, 300));
-    if (data.error) { console.error('API error:', data.error); break; }
-    const items = (data.items || []).filter(i => i.track && i.track.id);
+    if (data.error) {
+      console.error('Playlist fetch error:', data.error);
+      break;
+    }
+    const items = (data.items || []).filter(i => i && i.track && i.track.id);
     allTracks = allTracks.concat(items.map(i => i.track));
-    nextUrl = data.next ? data.next.replace('https://api.spotify.com/v1','') : null;
+    nextUrl = data.next || null;
   }
+
   currentPlaylistTracks = allTracks;
   document.getElementById('pl-meta').textContent = `${allTracks.length} songs`;
-  if (!allTracks.length) { document.getElementById('playlist-tracks-list').innerHTML = '<div class="empty">This playlist is empty</div>'; return; }
+
+  if (!allTracks.length) {
+    document.getElementById('playlist-tracks-list').innerHTML = '<div class="empty">This playlist is empty</div>';
+    return;
+  }
 
   document.getElementById('playlist-tracks-list').innerHTML = currentPlaylistTracks.map((t, idx) => {
     const ti = t.album?.images?.[2]?.url || '';
@@ -1242,7 +1272,6 @@ function toggleLikePlaylist() { showToast('Saved to library ♥'); }
 function seekTo(e) {
   const bar = document.getElementById('progress-bar');
   const pct = e.offsetX / bar.offsetWidth;
-  // Get current state for duration
   apiCall('/me/player').then(d => {
     if (d.item) {
       const pos = Math.floor(d.item.duration_ms * pct);
@@ -1301,7 +1330,6 @@ async function syncPlayer() {
   currentTrackUri = t.uri;
 }
 
-// Sync every 5s
 setInterval(() => { if (isPlaying && accessToken) syncPlayer(); }, 5000);
 
 // ============================================================
