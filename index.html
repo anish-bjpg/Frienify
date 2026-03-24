@@ -1067,13 +1067,24 @@ async function openPlaylist(id, name, img, total) {
 
   document.getElementById('pl-name').textContent = decodeURIComponent(name);
   document.getElementById('pl-type').textContent = 'Playlist';
-  document.getElementById('pl-meta').textContent = `${total} songs`;
+  document.getElementById('pl-meta').textContent = 'Loading...';
   const imgEl = document.getElementById('pl-img');
   imgEl.src = img ? decodeURIComponent(img) : '';
   currentPlaylistUri = `spotify:playlist:${id}`;
 
-  const data = await apiCall(`/playlists/${id}/tracks?limit=50`);
-  currentPlaylistTracks = (data.items || []).filter(i => i.track).map(i => i.track);
+  document.getElementById('playlist-tracks-list').innerHTML = '<div class="loading">Loading tracks...</div>';
+  // Paginate through all tracks
+  let allTracks = [];
+  let nextUrl = `/playlists/${id}/tracks?limit=50&offset=0`;
+  while (nextUrl) {
+    const data = await apiCall(nextUrl);
+    const items = (data.items || []).filter(i => i.track && i.track.id);
+    allTracks = allTracks.concat(items.map(i => i.track));
+    nextUrl = data.next ? data.next.replace('https://api.spotify.com/v1','') : null;
+  }
+  currentPlaylistTracks = allTracks;
+  document.getElementById('pl-meta').textContent = `${allTracks.length} songs`;
+  if (!allTracks.length) { document.getElementById('playlist-tracks-list').innerHTML = '<div class="empty">This playlist is empty</div>'; return; }
 
   document.getElementById('playlist-tracks-list').innerHTML = currentPlaylistTracks.map((t, idx) => {
     const ti = t.album?.images?.[2]?.url || '';
